@@ -1,36 +1,16 @@
 use crate::{
     browser,
-    engine::{load_image, Game, KeyState, Point, Rect, Renderer},
+    engine::{load_image, Game, KeyState, Rect, Renderer, Sheet},
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::collections::HashMap;
 use web_sys::HtmlImageElement;
 
 use self::red_hat_boy_states::*;
 
-#[derive(Deserialize, Clone)]
-struct SheetRect {
-    x: i16,
-    y: i16,
-    w: i16,
-    h: i16,
-}
-
-#[derive(Deserialize, Clone)]
-struct Cell {
-    frame: SheetRect,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct Sheet {
-    frames: HashMap<String, Cell>,
-}
-
 struct RedHatBoy {
     state_machine: RedHatBoyStateMachine,
-    sprite_sheet: Sheet,
+    pub sprite_sheet: Sheet,
     image: HtmlImageElement,
 }
 
@@ -80,22 +60,43 @@ impl RedHatBoy {
     fn run_right(&mut self) {
         self.state_machine = self.state_machine.transition(Event::Run);
     }
+
+    fn slide(&mut self) {
+        self.state_machine = self.state_machine.transition(Event::Slide);
+    }
+
+    fn jump(&mut self) {
+        self.state_machine = self.state_machine.transition(Event::Jump);
+    }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum RedHatBoyStateMachine {
     Idle(RedHatBoyState<Idle>),
     Running(RedHatBoyState<Running>),
+    Sliding(RedHatBoyState<Sliding>),
+    Jumping(RedHatBoyState<Jumping>),
 }
 
+#[derive(Debug)]
 pub enum Event {
     Run,
+    Slide,
+    Update,
+    Jump,
 }
 
 impl RedHatBoyStateMachine {
     fn transition(self, event: Event) -> Self {
+        log!("Transitioning from {:?} with {:?}", self, event);
         match (self, event) {
             (RedHatBoyStateMachine::Idle(state), Event::Run) => state.run().into(),
+            (RedHatBoyStateMachine::Running(state), Event::Jump) => state.jump().into(),
+            (RedHatBoyStateMachine::Running(state), Event::Slide) => state.slide().into(),
+            (RedHatBoyStateMachine::Idle(state), Event::Update) => state.update().into(),
+            (RedHatBoyStateMachine::Running(state), Event::Update) => state.update().into(),
+            (RedHatBoyStateMachine::Jumping(state), Event::Update) => state.update().into(),
+            (RedHatBoyStateMachine::Sliding(state), Event::Update) => state.update().into(),
             _ => self,
         }
     }
@@ -104,32 +105,58 @@ impl RedHatBoyStateMachine {
         match self {
             RedHatBoyStateMachine::Idle(state) => state.frame_name(),
             RedHatBoyStateMachine::Running(state) => state.frame_name(),
+            RedHatBoyStateMachine::Sliding(state) => state.frame_name(),
+            RedHatBoyStateMachine::Jumping(state) => state.frame_name(),
         }
     }
     fn context(&self) -> &RedHatBoyContext {
         match self {
             RedHatBoyStateMachine::Idle(state) => &state.context(),
             RedHatBoyStateMachine::Running(state) => &state.context(),
+            RedHatBoyStateMachine::Sliding(state) => &state.context(),
+            RedHatBoyStateMachine::Jumping(state) => &state.context(),
         }
     }
     fn update(self) -> Self {
-        match self {
-            RedHatBoyStateMachine::Idle(mut state) => {
-                state.update();
-                RedHatBoyStateMachine::Idle(state)
-            }
-            RedHatBoyStateMachine::Running(mut state) => {
-                state.update();
-                RedHatBoyStateMachine::Running(state)
-            }
-        }
+        self.transition(Event::Update)
     }
 }
 
-// From trait を実装することによって、into method で型の置き換えを行うことが
+// From trait を実装することによって、into method で型の置き換えを行うことができる
+impl From<RedHatBoyState<Idle>> for RedHatBoyStateMachine {
+    fn from(state: RedHatBoyState<Idle>) -> Self {
+        RedHatBoyStateMachine::Idle(state)
+    }
+}
 impl From<RedHatBoyState<Running>> for RedHatBoyStateMachine {
     fn from(state: RedHatBoyState<Running>) -> Self {
         RedHatBoyStateMachine::Running(state)
+    }
+}
+impl From<RedHatBoyState<Sliding>> for RedHatBoyStateMachine {
+    fn from(state: RedHatBoyState<Sliding>) -> Self {
+        RedHatBoyStateMachine::Sliding(state)
+    }
+}
+impl From<SlidingEndState> for RedHatBoyStateMachine {
+    fn from(end_state: SlidingEndState) -> Self {
+        match end_state {
+            SlidingEndState::Complete(running_state) => running_state.into(),
+            SlidingEndState::Sliding(sliding_state) => sliding_state.into(),
+        }
+    }
+}
+impl From<RedHatBoyState<Jumping>> for RedHatBoyStateMachine {
+    fn from(state: RedHatBoyState<Jumping>) -> Self {
+        RedHatBoyStateMachine::Jumping(state)
+    }
+}
+impl From<JumpingEndState> for RedHatBoyStateMachine {
+    fn from(end_state: JumpingEndState) -> Self {
+        match end_state {
+            JumpingEndState::Complete(running_state) => running_state.into(),
+            JumpingEndState::Jumping(sliding_state) => sliding_state.into(),
+        }
     }
 }
 
@@ -141,8 +168,14 @@ mod red_hat_boy_states {
     const IDLE_FRAMES: u8 = 29;
     const RUNNING_FRAMES: u8 = 23;
     const RUNNING_SPEED: i16 = 3;
+    const SLIDING_FRAMES: u8 = 14;
+    const SLIDING_FRAME_NAME: &str = "Slide";
+    const JUMPING_FRAME_NAME: &str = "Jump";
+    const JUMPING_FRAMES: u8 = 26;
+    const JUMP_SPEED: i16 = -25;
+    const GRAVITY: i16 = 1;
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub struct RedHatBoyState<S> {
         context: RedHatBoyContext,
         _state: S,
@@ -152,9 +185,13 @@ mod red_hat_boy_states {
         pub fn context(&self) -> &RedHatBoyContext {
             &self.context
         }
+
+        fn update_context(&mut self, frames: u8) {
+            self.context = self.context.update(frames);
+        }
     }
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub struct RedHatBoyContext {
         pub frame: u8,
         pub position: Point,
@@ -163,6 +200,8 @@ mod red_hat_boy_states {
 
     impl RedHatBoyContext {
         pub fn update(mut self, frame_count: u8) -> Self {
+            self.velocity.y += GRAVITY;
+
             if self.frame < frame_count {
                 self.frame += 1;
             } else {
@@ -170,7 +209,12 @@ mod red_hat_boy_states {
             }
 
             self.position.x += self.velocity.x;
-            self.position.x += self.velocity.y;
+            self.position.y += self.velocity.y;
+
+            if self.position.y > FLOOR {
+                self.position.y = FLOOR;
+            }
+
             self
         }
 
@@ -183,12 +227,23 @@ mod red_hat_boy_states {
             self.velocity.x += RUNNING_SPEED;
             self
         }
+
+        fn set_vertical_velocity(mut self, y: i16) -> Self {
+            self.velocity.y = y;
+            self
+        }
     }
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub struct Idle;
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub struct Running;
+
+    #[derive(Copy, Clone, Debug)]
+    pub struct Sliding;
+
+    #[derive(Copy, Clone, Debug)]
+    pub struct Jumping;
 
     impl RedHatBoyState<Idle> {
         pub fn new() -> Self {
@@ -212,8 +267,9 @@ mod red_hat_boy_states {
         pub fn frame_name(&self) -> &str {
             IDLE_FRAME_NAME
         }
-        pub fn update(&mut self) {
-            self.context = self.context.update(IDLE_FRAMES);
+        pub fn update(mut self) -> Self {
+            self.update_context(IDLE_FRAMES);
+            self
         }
     }
 
@@ -221,111 +277,129 @@ mod red_hat_boy_states {
         pub fn frame_name(&self) -> &str {
             RUN_FRAME_NAME
         }
-        pub fn update(&mut self) {
-            self.context = self.context.update(RUNNING_FRAMES);
+        pub fn update(mut self) -> Self {
+            self.update_context(RUNNING_FRAMES);
+            self
         }
+        pub fn slide(self) -> RedHatBoyState<Sliding> {
+            RedHatBoyState {
+                context: self.context.reset_frame(),
+                _state: Sliding {},
+            }
+        }
+        pub fn jump(self) -> RedHatBoyState<Jumping> {
+            RedHatBoyState {
+                context: self.context.set_vertical_velocity(JUMP_SPEED).reset_frame(),
+                _state: Jumping {},
+            }
+        }
+    }
+
+    impl RedHatBoyState<Sliding> {
+        pub fn frame_name(&self) -> &str {
+            SLIDING_FRAME_NAME
+        }
+        pub fn update(mut self) -> SlidingEndState {
+            self.update_context(SLIDING_FRAMES);
+
+            if self.context.frame >= SLIDING_FRAMES {
+                SlidingEndState::Complete(self.stand())
+            } else {
+                SlidingEndState::Sliding(self)
+            }
+        }
+        pub fn stand(self) -> RedHatBoyState<Running> {
+            RedHatBoyState {
+                context: self.context.reset_frame(),
+                _state: Running {},
+            }
+        }
+    }
+
+    impl RedHatBoyState<Jumping> {
+        pub fn frame_name(&self) -> &str {
+            JUMPING_FRAME_NAME
+        }
+        pub fn land(self) -> RedHatBoyState<Running> {
+            RedHatBoyState {
+                context: self.context.reset_frame(),
+                _state: Running {},
+            }
+        }
+        pub fn update(mut self) -> JumpingEndState {
+            self.update_context(JUMPING_FRAMES);
+            if self.context.position.y >= FLOOR {
+                JumpingEndState::Complete(self.land())
+            } else {
+                JumpingEndState::Jumping(self)
+            }
+        }
+    }
+
+    pub enum SlidingEndState {
+        Complete(RedHatBoyState<Running>),
+        Sliding(RedHatBoyState<Sliding>),
+    }
+
+    pub enum JumpingEndState {
+        Complete(RedHatBoyState<Running>),
+        Jumping(RedHatBoyState<Jumping>),
     }
 }
 
-pub struct WalkTheDog {
-    image: Option<HtmlImageElement>,
-    sheet: Option<Sheet>,
-    frame: u8,
-    position: Point,
-    rhb: Option<RedHatBoy>,
+pub enum WalkTheDog {
+    Loading,
+    Loaded(RedHatBoy),
 }
+
+/* pub struct WalkTheDog {
+    rhb: Option<RedHatBoy>,
+} */
 
 impl WalkTheDog {
     pub fn new() -> Self {
-        Self {
-            image: None,
-            sheet: None,
-            frame: 0,
-            position: Point { x: 0, y: 0 },
-            rhb: None,
-        }
+        WalkTheDog::Loading
     }
 }
 
 #[async_trait(?Send)]
 impl Game for WalkTheDog {
     async fn initialize(&self) -> Result<Box<dyn Game>> {
-        let sheet: Option<Sheet> = browser::fetch_json("rhb.json").await?.into_serde()?;
-        let image = Some(load_image("rhb.png").await?);
-
-        Ok(Box::new(WalkTheDog {
-            image: image.clone(),
-            sheet: sheet.clone(),
-            frame: self.frame,
-            position: self.position,
-            rhb: Some(RedHatBoy::new(
-                sheet.clone().ok_or_else(|| anyhow!("No Sheet Present"))?,
-                image.clone().ok_or_else(|| anyhow!("No Image Present"))?,
-            )),
-        }))
+        match self {
+            WalkTheDog::Loading => {
+                let json = browser::fetch_json("rhb.json").await?;
+                let rhb = RedHatBoy::new(json.into_serde::<Sheet>()?, load_image("rhb.png").await?);
+                Ok(Box::new(WalkTheDog::Loaded(rhb)))
+            }
+            WalkTheDog::Loaded(_) => Err(anyhow!("Error: Game is already initialized!")),
+        }
     }
     fn update(&mut self, keystate: &KeyState) {
-        if self.frame < 23 {
-            self.frame += 1;
-        } else {
-            self.frame = 0;
+        if let WalkTheDog::Loaded(rhb) = self {
+            if keystate.is_pressed("ArrowDown") {
+                rhb.slide();
+            }
+            if keystate.is_pressed("ArrowUp") {}
+            if keystate.is_pressed("ArrowRight") {
+                rhb.run_right();
+            }
+            if keystate.is_pressed("ArrowLeft") {}
+            if keystate.is_pressed("Space") {
+                rhb.jump();
+            }
+            rhb.update();
         }
-        self.rhb.as_mut().unwrap().update();
-
-        let mut velocity = Point { x: 0, y: 0 };
-        if keystate.is_pressed("ArrowDown") {
-            velocity.y += 3;
-        }
-        if keystate.is_pressed("ArrowUp") {
-            velocity.y -= 3;
-        }
-        if keystate.is_pressed("ArrowRight") {
-            velocity.x += 3;
-            self.rhb.as_mut().unwrap().run_right();
-        }
-        if keystate.is_pressed("ArrowLeft") {
-            velocity.x -= 3;
-        }
-
-        self.position.x += velocity.x;
-        self.position.y += velocity.y;
-
-        self.rhb.as_mut().unwrap().update();
     }
 
     fn draw(&self, renderer: &Renderer) {
-        let current_sprite = (self.frame / 3) + 1;
-        let frame_name = format!("Run ({}).png", current_sprite);
-        let sprite = self
-            .sheet
-            .as_ref()
-            .and_then(|sheet| sheet.frames.get(&frame_name))
-            .expect("Cell not found");
-
         renderer.clear(&Rect {
             x: 0.0,
             y: 0.0,
             width: 600.0,
             height: 600.0,
         });
-
-        self.image.as_ref().map(|image| {
-            renderer.draw_image(
-                &image,
-                &Rect {
-                    x: sprite.frame.x.into(),
-                    y: sprite.frame.y.into(),
-                    width: sprite.frame.w.into(),
-                    height: sprite.frame.h.into(),
-                },
-                &Rect {
-                    x: self.position.x.into(),
-                    y: self.position.y.into(),
-                    width: sprite.frame.w.into(),
-                    height: sprite.frame.h.into(),
-                },
-            )
-        });
-        self.rhb.as_ref().unwrap().draw(renderer);
+        if let WalkTheDog::Loaded(rhb) = self {
+            rhb.draw(renderer);
+        }
     }
 }
