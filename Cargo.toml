@@ -28,6 +28,8 @@ getrandom = { version = "0.2.3", features = ["js"] }
 futures = "0.3.18"
 wasm-bindgen-futures = "0.4.28"
 serde = {version = "1.0.131", features = ["derive"] }
+anyhow = "1.0.51"
+async-trait = "0.1.52"
 
 
 # `wee_alloc` is a tiny allocator for wasm that is only ~1K in code size
@@ -39,7 +41,7 @@ wee_alloc = { version = "0.4.2", optional = true }
 # like the DOM.
 [dependencies.web-sys]
 version = "0.3.55"
-features = ["console", "Window", "Document", "HtmlCanvasElement", "CanvasRenderingContext2d", "Element", "HtmlImageElement", "Response"]
+features = ["console", "Window", "Document", "HtmlCanvasElement", "CanvasRenderingContext2d", "Element", "HtmlImageElement", "Response", "Performance", "KeyboardEvent"]
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
