@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::*;
 mod browser;
 mod engine;
 mod game;
+mod segments;
 
 // When the `wee_alloc` feature is enabled, this uses `wee_alloc` as the global
 // allocator.

@@ -12,7 +12,7 @@ use std::{cell::RefCell, collections::HashMap};
 use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlImageElement};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Point {
     pub x: i16,
     pub y: i16,
@@ -27,8 +27,10 @@ pub struct SheetRect {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Cell {
     pub frame: SheetRect,
+    pub sprite_source_size: SheetRect,
 }
 
 #[derive(Deserialize, Clone)]
@@ -139,8 +141,8 @@ pub struct Renderer {
 impl Renderer {
     pub fn clear(&self, rect: &Rect) {
         self.context.clear_rect(
-            rect.x.into(),
-            rect.y.into(),
+            rect.x().into(),
+            rect.y().into(),
             rect.width.into(),
             rect.height.into(),
         )
@@ -149,27 +151,86 @@ impl Renderer {
     /// * `frame` - sprite から切り出す矩形
     /// * `destination` - canvas 上に表示する位置
     pub fn draw_image(&self, image: &HtmlImageElement, frame: &Rect, destination: &Rect) {
+        self.draw_rect(destination);
         self.context
             .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
                 &image,
-                frame.x.into(),
-                frame.y.into(),
+                frame.x().into(),
+                frame.y().into(),
                 frame.width.into(),
                 frame.height.into(),
-                destination.x.into(),
-                destination.y.into(),
+                destination.x().into(),
+                destination.y().into(),
                 destination.width.into(),
                 destination.height.into(),
             )
             .expect("Drawing is throwing exceptions! Unrecoverable error.");
     }
+
+    pub fn draw_rect(&self, rect: &Rect) {
+        self.context.begin_path();
+        self.context.rect(
+            rect.x().into(),
+            rect.y().into(),
+            rect.width.into(),
+            rect.height.into(),
+        );
+        self.context.stroke();
+    }
+
+    pub fn draw_entire_image(&self, image: &HtmlImageElement, position: &Point) {
+        self.context
+            .draw_image_with_html_image_element(image, position.x.into(), position.y.into())
+            .expect("Drawing is throwing exceptions! Unrecoverable error.")
+    }
 }
 
+#[derive(Default)]
 pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub position: Point,
+    pub width: i16,
+    pub height: i16,
+}
+
+impl Rect {
+    pub const fn new(position: Point, width: i16, height: i16) -> Self {
+        Rect {
+            position,
+            width,
+            height,
+        }
+    }
+
+    pub const fn new_from_x_y(x: i16, y: i16, width: i16, height: i16) -> Self {
+        Rect::new(Point { x, y }, width, height)
+    }
+
+    pub fn intersects(&self, rect: &Rect) -> bool {
+        self.x() < (rect.x() + rect.width)
+            && self.x() + self.width > rect.x()
+            && self.y() < (rect.y() + rect.height)
+            && self.y() + self.height > rect.y()
+    }
+
+    pub fn right(&self) -> i16 {
+        self.x() + self.width
+    }
+
+    pub fn bottom(&self) -> i16 {
+        self.y() + self.height
+    }
+
+    pub fn x(&self) -> i16 {
+        self.position.x
+    }
+
+    pub fn y(&self) -> i16 {
+        self.position.y
+    }
+
+    pub fn set_x(&mut self, x: i16) {
+        self.position.x = x;
+    }
 }
 
 enum KeyPress {
@@ -194,7 +255,7 @@ fn prepare_input() -> Result<UnboundedReceiver<KeyPress>> {
     }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
 
     browser::window()?.set_onkeydown(Some(onkeydown.as_ref().unchecked_ref()));
-    browser::window()?.set_onkeyup(Some(onkeydown.as_ref().unchecked_ref()));
+    browser::window()?.set_onkeyup(Some(onkeyup.as_ref().unchecked_ref()));
 
     onkeydown.forget();
     onkeyup.forget();
@@ -202,6 +263,7 @@ fn prepare_input() -> Result<UnboundedReceiver<KeyPress>> {
     Ok(keydown_receiver)
 }
 
+#[derive(Debug)]
 pub struct KeyState {
     pressed_keys: HashMap<String, web_sys::KeyboardEvent>,
 }
@@ -227,6 +289,7 @@ impl KeyState {
 }
 
 fn process_input(state: &mut KeyState, keyevent_receiver: &mut UnboundedReceiver<KeyPress>) {
+    log!("state: {:?}", state);
     loop {
         match keyevent_receiver.try_next() {
             Ok(None) => break,
@@ -236,5 +299,69 @@ fn process_input(state: &mut KeyState, keyevent_receiver: &mut UnboundedReceiver
                 KeyPress::KeyDown(evt) => state.set_pressed(&evt.code(), evt),
             },
         }
+    }
+}
+
+pub struct Image {
+    element: HtmlImageElement,
+    bounding_box: Rect,
+}
+
+impl Image {
+    pub fn new(element: HtmlImageElement, position: Point) -> Self {
+        let bounding_box = Rect {
+            position,
+            width: element.width() as i16,
+            height: element.height() as i16,
+        };
+        Self {
+            element,
+            bounding_box,
+        }
+    }
+
+    pub fn draw(&self, renderer: &Renderer) {
+        // TODO: バウンディングボックス表示用
+        renderer.draw_rect(&Rect {
+            position: self.bounding_box.position,
+            width: self.element.width() as i16,
+            height: self.element.height() as i16,
+        });
+        renderer.draw_entire_image(&self.element, &self.bounding_box.position);
+    }
+
+    pub fn bounding_box(&self) -> &Rect {
+        &self.bounding_box
+    }
+
+    pub fn move_horizontally(&mut self, distance: i16) {
+        self.set_x(self.bounding_box.x() + distance);
+    }
+
+    pub fn set_x(&mut self, x: i16) {
+        self.bounding_box.set_x(x);
+    }
+
+    pub fn right(&self) -> i16 {
+        self.bounding_box.right()
+    }
+}
+
+pub struct SpriteSheet {
+    sheet: Sheet,
+    image: HtmlImageElement,
+}
+
+impl SpriteSheet {
+    pub fn new(sheet: Sheet, image: HtmlImageElement) -> Self {
+        Self { sheet, image }
+    }
+
+    pub fn cell(&self, name: &str) -> Option<&Cell> {
+        self.sheet.frames.get(name)
+    }
+
+    pub fn draw(&self, renderer: &Renderer, source: &Rect, destination: &Rect) {
+        renderer.draw_image(&self.image, source, destination);
     }
 }
