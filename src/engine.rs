@@ -118,7 +118,10 @@ impl GameLoop {
         let mut keystate = KeyState::new();
         *g.borrow_mut() = Some(browser::create_raf_closure(move |perf: f64| {
             process_input(&mut keystate, &mut keyevent_receiver);
-            game_loop.accumulated_delta += (perf - game_loop.last_frame) as f32;
+
+            let frame_time = perf - game_loop.last_frame;
+            game_loop.accumulated_delta += frame_time as f32;
+
             while game_loop.accumulated_delta > FRAME_SIZE {
                 game.update(&keystate);
                 game_loop.accumulated_delta -= FRAME_SIZE;
@@ -126,6 +129,12 @@ impl GameLoop {
             game_loop.last_frame = perf;
             game.draw(&renderer);
             browser::request_animation_frame(f.borrow().as_ref().unwrap());
+
+            if cfg!(debug_assertions) {
+                unsafe {
+                    draw_frame_rate(&renderer, frame_time);
+                }
+            }
         }));
 
         browser::request_animation_frame(
@@ -154,7 +163,7 @@ impl Renderer {
     /// * `frame` - sprite から切り出す矩形
     /// * `destination` - canvas 上に表示する位置
     pub fn draw_image(&self, image: &HtmlImageElement, frame: &Rect, destination: &Rect) {
-        self.draw_rect(destination);
+        // self.draw_rect(destination);
         self.context
             .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
                 &image,
@@ -170,6 +179,7 @@ impl Renderer {
             .expect("Drawing is throwing exceptions! Unrecoverable error.");
     }
 
+    #[allow(dead_code)]
     pub fn draw_rect(&self, rect: &Rect) {
         self.context.begin_path();
         self.context.rect(
@@ -179,6 +189,15 @@ impl Renderer {
             rect.height.into(),
         );
         self.context.stroke();
+    }
+
+    #[allow(dead_code)]
+    pub fn draw_text(&self, text: &str, location: &Point) -> Result<()> {
+        self.context.set_font("16pt serif");
+        self.context
+            .fill_text(text, location.x.into(), location.y.into())
+            .map_err(|err| anyhow!("Error filling text {:#?}", err))?;
+        Ok(())
     }
 
     pub fn draw_entire_image(&self, image: &HtmlImageElement, position: &Point) {
@@ -324,12 +343,6 @@ impl Image {
     }
 
     pub fn draw(&self, renderer: &Renderer) {
-        // TODO: バウンディングボックス表示用
-        renderer.draw_rect(&Rect {
-            position: self.bounding_box.position,
-            width: self.element.width() as i16,
-            height: self.element.height() as i16,
-        });
         renderer.draw_entire_image(&self.element, &self.bounding_box.position);
     }
 
@@ -376,7 +389,7 @@ pub struct Audio {
 
 #[derive(Clone, Debug)]
 pub struct Sound {
-    buffer: AudioBuffer,
+    pub buffer: AudioBuffer,
 }
 
 impl Audio {
@@ -413,4 +426,45 @@ pub fn add_click_handler(elem: HtmlElement) -> UnboundedReceiver<()> {
     on_click.forget();
 
     click_receiver
+}
+
+unsafe fn draw_frame_rate(renderer: &Renderer, frame_time: f64) {
+    static mut FRAMES_COUNTED: i32 = 0;
+    static mut TOTAL_FRAME_TIME: f64 = 0.0;
+    static mut FRAME_RATE: i32 = 0;
+    FRAMES_COUNTED += 1;
+    TOTAL_FRAME_TIME += frame_time;
+    if TOTAL_FRAME_TIME > 1000.0 {
+        FRAME_RATE = FRAMES_COUNTED;
+        TOTAL_FRAME_TIME = 0.0;
+        FRAMES_COUNTED = 0;
+    }
+    if let Err(err) = renderer.draw_text(
+        &format!("Frame Rate {}", FRAME_RATE),
+        &Point { x: 400, y: 100 },
+    ) {
+        error!("Could not draw text {:#?}", err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_rects_that_intersect_on_the_left() {
+        let rect1 = Rect {
+            position: Point { x: 10, y: 10 },
+            height: 100,
+            width: 100,
+        };
+
+        let rect2 = Rect {
+            position: Point { x: 0, y: 10 },
+            height: 100,
+            width: 100,
+        };
+
+        assert_eq!(rect2.intersects(&rect1), true);
+    }
 }
