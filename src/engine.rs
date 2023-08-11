@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::{cell::RefCell, collections::HashMap};
 use wasm_bindgen::prelude::*;
-use web_sys::{AudioBuffer, AudioContext, CanvasRenderingContext2d, HtmlImageElement};
+use web_sys::{AudioBuffer, AudioContext, CanvasRenderingContext2d, HtmlElement, HtmlImageElement};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Point {
@@ -401,4 +401,16 @@ impl Audio {
     pub fn play_looping_sound(&self, sound: &Sound) -> Result<()> {
         sound::play_sound(&self.context, &sound.buffer, LOOPING::YES)
     }
+}
+
+pub fn add_click_handler(elem: HtmlElement) -> UnboundedReceiver<()> {
+    let (mut click_sender, click_receiver) = unbounded();
+
+    let on_click = browser::closure_wrap(Box::new(move || {
+        click_sender.start_send(());
+    }) as Box<dyn FnMut()>);
+    elem.set_onclick(Some(on_click.as_ref().unchecked_ref()));
+    on_click.forget();
+
+    click_receiver
 }
